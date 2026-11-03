@@ -3,12 +3,20 @@ import tempfile
 import os
 import time
 
+# --- INYECCIÓN DE CLAVE SEGURA ---
+try:
+    if "GEMINI_API_KEY" in st.secrets:
+        os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+except:
+    pass
+
 try:
     import optimizar_y_renombrar as opt
     import indexador_expediente as indx
     MODO_REAL = True
 except Exception as e:
     MODO_REAL = False
+    ERROR_MSJ = str(e)
 
 # 1. CONFIGURACIÓN Y ESTILOS GLOBALES
 st.set_page_config(page_title="Fol.ia | Infraestructura Legal", page_icon="⚖️", layout="wide")
@@ -29,7 +37,12 @@ if 'creditos' not in st.session_state:
     st.session_state.creditos = 2500
 
 with st.sidebar:
-    st.markdown("## ⚖️ Fol.ia")
+    # --- INTEGRACIÓN DEL LOGO ---
+    try:
+        st.image("logo.jpg", use_container_width=True)
+    except:
+        st.markdown("## ⚖️ Fol.ia")
+        
     st.markdown("<span class='zdr-badge'>✓ Zero Data Retention</span>", unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -39,8 +52,9 @@ with st.sidebar:
     
     st.markdown("---")
     st.caption("🔒 Tus documentos son procesados en memoria asíncrona y expurgados inmediatamente tras su descarga. No usamos tus expedientes para entrenar IA.")
+    
     if not MODO_REAL:
-        st.error("Modo Visual: Scripts de backend no detectados.")
+        st.error(f"⚠️ Error cargando scripts: {ERROR_MSJ}")
 
 st.title("Automatización Documental Jurídica")
 st.markdown("""
@@ -75,7 +89,11 @@ with tab1:
                         nuevo_nombre = opt.procesar_desde_web(path_in, path_out, token_adobe)
                         
                         st.write("🤖 Extrayendo taxonomía con Inteligencia Artificial...")
-                        nombre_final = f"{nuevo_nombre}.pdf" if nuevo_nombre else f"{arch.name.replace('.pdf', '')}_Opt.pdf"
+                        if nuevo_nombre.startswith("ERROR"):
+                            st.warning(f"⚠️ IA omitida ({nuevo_nombre}). Se descargará con nombre genérico.")
+                            nombre_final = f"{arch.name.replace('.pdf', '')}_Opt.pdf"
+                        else:
+                            nombre_final = f"{nuevo_nombre}.pdf"
                         
                         with open(path_out, "rb") as f:
                             pdf_bytes = f.read()
