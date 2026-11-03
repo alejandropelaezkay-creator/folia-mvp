@@ -7,8 +7,9 @@ try:
     import optimizar_y_renombrar as opt
     import indexador_expediente as indx
     MODO_REAL = True
-except ImportError:
+except Exception as e:
     MODO_REAL = False
+    st.error(f"Error interno cargando los motores: {e}")
 
 # 1. CONFIGURACIÓN Y ESTILOS GLOBALES
 st.set_page_config(page_title="Fol.ia | Infraestructura Legal", page_icon="⚖️", layout="wide")
