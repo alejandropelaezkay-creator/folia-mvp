@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 import requests
 import pypdfium2 as pdfium
+import pymupdf as fitz
 import pikepdf
 from PIL import ImageStat
 from google import genai
@@ -56,14 +57,12 @@ def obtener_token_adobe():
 def procesar_bloque_adobe(entrada_bloque, salida_bloque, token):
     hdr = {"x-api-key": CLIENT_ID, "Authorization": f"Bearer {token}"}
     
-    # 1. Obtener URL de subida
     up_res = requests.post(
         "https://pdf-services.adobe.io/assets", 
         headers={**hdr, "Content-Type": "application/json"}, 
         json={"mediaType": "application/pdf"}
     ).json()
     
-    # 2. Subir archivo
     with open(entrada_bloque, "rb") as f:
         requests.put(
             up_res["uploadUri"], 
@@ -71,7 +70,6 @@ def procesar_bloque_adobe(entrada_bloque, salida_bloque, token):
             headers={"Content-Type": "application/pdf"}
         ).raise_for_status()
     
-    # 3. Iniciar OCR
     ocr_r = requests.post(
         "https://pdf-services.adobe.io/operation/ocr", 
         headers={**hdr, "Content-Type": "application/json"}, 
@@ -85,7 +83,6 @@ def procesar_bloque_adobe(entrada_bloque, salida_bloque, token):
             break
         time.sleep(2)
         
-    # 4. Comprimir PDF
     cmp_r = requests.post(
         "https://pdf-services.adobe.io/operation/compresspdf", 
         headers={**hdr, "Content-Type": "application/json"}, 
@@ -105,17 +102,17 @@ def obtener_nombre_gemini(pdf_path: Path):
         return ""
     
     client = genai.Client(api_key=API_KEY)
-    pdf = pdfium.PdfDocument(str(pdf_path))
     
-    indices = list(range(min(3, len(pdf)))) + list(range(max(0, len(pdf) - 3), len(pdf)))
+    # Lectura segura del texto extraído por Adobe sin corromper el PDF
+    doc = fitz.open(str(pdf_path))
+    indices = list(range(min(3, len(doc)))) + list(range(max(0, len(doc) - 3), len(doc)))
     texto_extraido = []
     
     for i in sorted(set(indices)):
-        texto_pagina = pdf[i].get_textpage().get_text_range()
-        texto_extraido.append(texto_pagina[:1500])
+        texto_extraido.append(doc[i].get_text()[:1500])
         
+    doc.close()
     texto = "".join(texto_extraido)
-    pdf.close()
     
     try:
         res = client.models.generate_content(
