@@ -2,113 +2,152 @@ import streamlit as st
 import tempfile
 import os
 import time
-from pathlib import Path
 
-# Importar los motores de procesamiento
 try:
     import optimizar_y_renombrar as opt
     import indexador_expediente as indx
     MODO_REAL = True
-except ImportError as e:
+except ImportError:
     MODO_REAL = False
 
+# 1. CONFIGURACIÓN Y ESTILOS GLOBALES
 st.set_page_config(page_title="Fol.ia | Infraestructura Legal", page_icon="⚖️", layout="wide")
 
 st.markdown("""
     <style>
-    .main { background-color: #f8f9fa; }
-    h1 { color: #1e3d59; font-weight: 700; font-family: 'Helvetica Neue', sans-serif; }
-    .stButton>button { background-color: #1e3d59; color: white; border-radius: 4px; padding: 0.5rem 1rem; font-weight: 600; }
-    .stButton>button:hover { background-color: #132a40; }
-    .metric-container { background-color: white; padding: 1rem; border-radius: 8px; border: 1px solid #e9ecef; }
-    .badge-zdr { background-color: #e8f5e9; color: #2e7d32; padding: 4px 8px; border-radius: 4px; font-weight: bold; border: 1px solid #c8e6c9; }
+    .main { background-color: #fbfcff; }
+    h1, h2, h3 { color: #0f2537; font-family: 'Inter', sans-serif; font-weight: 700; }
+    .hero-text { font-size: 1.15rem; color: #4a5568; margin-bottom: 2rem; }
+    .stButton>button { background-color: #0f2537; color: white; border-radius: 6px; padding: 0.6rem 1.2rem; font-weight: 600; border: none; }
+    .stButton>button:hover { background-color: #1a365d; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .metric-card { background: white; padding: 1.5rem; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .zdr-badge { background-color: #c6f6d5; color: #22543d; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; }
     </style>
 """, unsafe_allow_html=True)
 
+# 2. GESTIÓN DE CRÉDITOS
 if 'creditos' not in st.session_state:
     st.session_state.creditos = 2500
 
+# 3. PANEL LATERAL (SIDEBAR DASHBOARD)
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/1/1a/Scale_of_justice_2.svg/200px-Scale_of_justice_2.svg.png", width=60)
-    st.markdown("### Fol.ia Suite")
-    st.markdown("<span class='badge-zdr'>✓ Zero Data Retention</span>", unsafe_allow_html=True)
-    st.markdown("---")
-    st.markdown("<div class='metric-container'>", unsafe_allow_html=True)
-    st.metric(label="Saldo de Fojas", value=f"{st.session_state.creditos:,}")
+    st.markdown("## ⚖️ Fol.ia")
+    st.markdown("<span class='zdr-badge'>✓ Zero Data Retention</span>", unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
+    st.metric(label="Saldo Prepago", value=f"{st.session_state.creditos:,} fojas")
     st.markdown("</div>", unsafe_allow_html=True)
+    
     st.markdown("---")
-    st.caption("Conectado vía conexión cifrada asíncrona. Los archivos se destruyen tras la descarga.")
+    st.caption("🔒 Tus documentos son procesados en memoria asíncrona y expurgados inmediatamente tras su descarga. No usamos tus expedientes para entrenar IA.")
+    if not MODO_REAL:
+        st.error("Modo Visual: Scripts de backend no detectados.")
 
-st.title("Procesamiento de Expedientes")
-if not MODO_REAL:
-    st.error("⚠️ Faltan los scripts de procesamiento en GitHub.")
+# 4. ENCABEZADO Y PROPUESTA DE VALOR (HERO SECTION)
+st.title("Automatización Documental Jurídica")
+st.markdown("""
+<div class='hero-text'>
+Erradicamos el trabajo administrativo manual de tu despacho. Fol.ia purga fojas en blanco, comprime expedientes pesados mediante OCR, y utiliza Inteligencia Artificial para indexar actuados leyendo la foliatura manuscrita del juzgado. <b>Listos para subir a Ciudadanía Digital o el SINPLU.</b>
+</div>
+""", unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["📄 Contratos (Renombrado)", "📚 Expedientes Judiciales (Indexación)"])
+# 5. ÁREA DE TRABAJO (TABS)
+tab1, tab2 = st.tabs(["📄 Documentos Individuales", "📚 Expedientes"])
 
-# PESTAÑA 1: CONTRATOS Y MEMORIALES
+# --- MÓDULO 1: DOCUMENTOS INDIVIDUALES ---
 with tab1:
-    docs_subidos = st.file_uploader("Arrastra contratos, poderes o memoriales sueltos", type="pdf", accept_multiple_files=True, key="docs")
+    st.markdown("### Saneamiento y Renombrado Inteligente")
+    st.write("Sube memoriales, contratos o poderes. El sistema los optimizará y aplicará reglas archivísticas estandarizadas para el nombre del archivo.")
+    
+    docs_subidos = st.file_uploader("Arrastra tus documentos PDF aquí", type="pdf", accept_multiple_files=True, key="docs")
+    
     if docs_subidos and st.button("Procesar Documentos", type="primary", key="btn_docs"):
-        if MODO_REAL:
-            try:
-                token_adobe = opt.obtener_token_adobe()
-                barra = st.progress(0)
-                estado = st.empty()
-                
-                for i, arch in enumerate(docs_subidos):
-                    estado.info(f"Procesando y renombrando: {arch.name}")
-                    
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in, \
-                         tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
-                        tmp_in.write(arch.getvalue())
-                        path_in, path_out = tmp_in.name, tmp_out.name
-                    
-                    nuevo_nombre = opt.procesar_desde_web(path_in, path_out, token_adobe)
-                    nombre_final = f"{nuevo_nombre}.pdf" if nuevo_nombre else f"{arch.name.replace('.pdf', '')}_Opt.pdf"
-                    
-                    with open(path_out, "rb") as f:
-                        pdf_bytes = f.read()
+        for i, arch in enumerate(docs_subidos):
+            # UX: Barra de progreso dinámica estilo SaaS
+            with st.status(f"Procesando: {arch.name}", expanded=True) as status:
+                try:
+                    if MODO_REAL:
+                        st.write("🔐 Autenticando motores de procesamiento...")
+                        token_adobe = opt.obtener_token_adobe()
                         
-                    st.download_button(label=f"⬇️ Descargar {nombre_final}", data=pdf_bytes, file_name=nombre_final, mime="application/pdf", key=f"dl_{i}")
+                        st.write("🔍 Analizando contraste y purgando fojas en blanco...")
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in, \
+                             tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
+                            tmp_in.write(arch.getvalue())
+                            path_in, path_out = tmp_in.name, tmp_out.name
+                        
+                        st.write("⚙️ Aplicando OCR y compresión estructural...")
+                        nuevo_nombre = opt.procesar_desde_web(path_in, path_out, token_adobe)
+                        
+                        st.write("🤖 Extrayendo taxonomía con Inteligencia Artificial...")
+                        nombre_final = f"{nuevo_nombre}.pdf" if nuevo_nombre else f"{arch.name.replace('.pdf', '')}_Opt.pdf"
+                        
+                        with open(path_out, "rb") as f:
+                            pdf_bytes = f.read()
+                        
+                        os.unlink(path_in)
+                        os.unlink(path_out)
+                    else:
+                        # Simulador si no hay backend
+                        st.write("🔍 Analizando fojas en blanco...")
+                        time.sleep(1)
+                        st.write("⚙️ Comprimiendo archivo...")
+                        time.sleep(1)
+                        nombre_final = f"{arch.name.replace('.pdf', '')}_Opt.pdf"
+                        pdf_bytes = b"Bytes de prueba"
                     
-                    os.unlink(path_in)
-                    os.unlink(path_out)
+                    # Cierre exitoso del componente visual
+                    status.update(label=f"¡Documento optimizado: {nombre_final}!", state="complete", expanded=False)
                     st.session_state.creditos -= 15
-                    barra.progress((i + 1) / len(docs_subidos))
-                estado.success("✅ Procesamiento completado.")
-            except Exception as e:
-                st.error(f"Error en el servidor: {str(e)}")
+                    
+                    st.download_button(label=f"⬇️ Descargar archivo", data=pdf_bytes, file_name=nombre_final, mime="application/pdf", key=f"dl_doc_{i}")
+                    
+                except Exception as e:
+                    status.update(label="Fallo en el procesamiento", state="error", expanded=True)
+                    st.error(f"Error técnico: {str(e)}")
 
-# PESTAÑA 2: EXPEDIENTES
+# --- MÓDULO 2: EXPEDIENTES MASIVOS ---
 with tab2:
-    exp_subidos = st.file_uploader("Arrastra tomos de expedientes completos", type="pdf", accept_multiple_files=True, key="exp")
+    st.markdown("### Indexación por Foliatura Manuscrita")
+    st.write("Sube tomos completos devueltos por el juzgado. Fol.ia leerá los números manuscritos en la esquina superior derecha y creará un índice (marcadores) navegable por actuado procesal.")
+    
+    exp_subidos = st.file_uploader("Arrastra tus tomos o expedientes PDF", type="pdf", accept_multiple_files=True, key="exp")
+    
     if exp_subidos and st.button("Indexar Expedientes", type="primary", key="btn_exp"):
-        if MODO_REAL:
-            try:
-                token_adobe = indx.obtener_token_adobe()
-                barra_exp = st.progress(0)
-                estado_exp = st.empty()
-                
-                for i, arch in enumerate(exp_subidos):
-                    estado_exp.info(f"Mapeando foliatura en: {arch.name}")
-                    
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in, \
-                         tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
-                        tmp_in.write(arch.getvalue())
-                        path_in, path_out = tmp_in.name, tmp_out.name
-                    
-                    indx.indexar_desde_web(path_in, path_out, token_adobe)
-                    nombre_final = arch.name.replace('.pdf', '_Indexado.pdf')
-                    
-                    with open(path_out, "rb") as f:
-                        pdf_bytes = f.read()
+        for i, arch in enumerate(exp_subidos):
+            with st.status(f"Mapeando Expediente: {arch.name}", expanded=True) as status_exp:
+                try:
+                    if MODO_REAL:
+                        st.write("🔐 Preparando infraestructura asíncrona...")
+                        token_adobe = indx.obtener_token_adobe()
                         
-                    st.download_button(label=f"⬇️ Descargar {nombre_final}", data=pdf_bytes, file_name=nombre_final, mime="application/pdf", key=f"dl_exp_{i}")
-                    
-                    os.unlink(path_in)
-                    os.unlink(path_out)
+                        st.write("🧹 Saneando y estabilizando el documento masivo...")
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in, \
+                             tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
+                            tmp_in.write(arch.getvalue())
+                            path_in, path_out = tmp_in.name, tmp_out.name
+                        
+                        st.write("👁️ Gemini Vision leyendo foliatura manuscrita e inyectando marcadores...")
+                        indx.indexar_desde_web(path_in, path_out, token_adobe)
+                        
+                        nombre_final = arch.name.replace('.pdf', '_Indexado.pdf')
+                        with open(path_out, "rb") as f:
+                            pdf_bytes = f.read()
+                            
+                        os.unlink(path_in)
+                        os.unlink(path_out)
+                    else:
+                        st.write("👁️ Simulando lectura de foliatura...")
+                        time.sleep(2)
+                        nombre_final = arch.name.replace('.pdf', '_Indexado.pdf')
+                        pdf_bytes = b"Bytes de prueba"
+                        
+                    status_exp.update(label="¡Expediente indexado con éxito!", state="complete", expanded=False)
                     st.session_state.creditos -= 85
-                    barra_exp.progress((i + 1) / len(exp_subidos))
-                estado_exp.success("✅ Estructuración finalizada.")
-            except Exception as e:
-                st.error(f"Error en el servidor: {str(e)}")
+                    
+                    st.download_button(label=f"⬇️ Descargar Expediente", data=pdf_bytes, file_name=nombre_final, mime="application/pdf", key=f"dl_exp_{i}")
+                    
+                except Exception as e:
+                    status_exp.update(label="Fallo en la indexación", state="error", expanded=True)
+                    st.error(f"Error técnico: {str(e)}")
