@@ -12,7 +12,6 @@ from google.genai import types
 
 CLIENT_ID = os.getenv("PDF_SERVICES_CLIENT_ID", "47ecbefd40624c578b1d84362ffda6c7")
 CLIENT_SECRET = os.getenv("PDF_SERVICES_CLIENT_SECRET", "p8e-71yKV_apZKh_1XSSNr5aydixYIAar3F8")
-API_KEY = os.getenv("GEMINI_API_KEY")
 
 UMBRAL_BLANCO = 1.5
 
@@ -98,23 +97,27 @@ def procesar_bloque_adobe(entrada_bloque, salida_bloque, token):
         time.sleep(2)
 
 def obtener_nombre_gemini(pdf_path: Path):
-    if not API_KEY: 
-        return ""
-    
-    client = genai.Client(api_key=API_KEY)
-    
-    # Lectura segura del texto extraído por Adobe sin corromper el PDF
-    doc = fitz.open(str(pdf_path))
-    indices = list(range(min(3, len(doc)))) + list(range(max(0, len(doc) - 3), len(doc)))
-    texto_extraido = []
-    
-    for i in sorted(set(indices)):
-        texto_extraido.append(doc[i].get_text()[:1500])
-        
-    doc.close()
-    texto = "".join(texto_extraido)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key: 
+        return "ERROR_API_KEY_FALTANTE"
     
     try:
+        doc = fitz.open(str(pdf_path))
+        indices = list(range(min(3, len(doc)))) + list(range(max(0, len(doc) - 3), len(doc)))
+        texto_extraido = []
+        for i in sorted(set(indices)):
+            texto_extraido.append(doc[i].get_text()[:1500])
+        doc.close()
+        texto = "".join(texto_extraido)
+        
+        if len(texto.strip()) < 20:
+            return "ERROR_OCR_SIN_TEXTO"
+            
+    except Exception as e:
+        return f"ERROR_LECTURA_PDF"
+    
+    try:
+        client = genai.Client(api_key=api_key)
         res = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=f"Analiza este texto documental:\n\n{texto}",
@@ -126,9 +129,9 @@ def obtener_nombre_gemini(pdf_path: Path):
         if res.text:
             limpio = res.text.strip().replace("\n", "")
             return re.sub(r'[\\/*?:"<>|]', '-', limpio)[:120]
-        return ""
-    except Exception:
-        return ""
+        return "ERROR_GEMINI_RESPUESTA_VACIA"
+    except Exception as e:
+        return f"ERROR_GEMINI_CONEXION"
 
 def procesar_desde_web(pdf_path_in, pdf_path_out, token_adobe):
     path_temp = Path(pdf_path_in).with_suffix(".temp.pdf")
