@@ -1,0 +1,7 @@
+streamlit
+pypdfium2
+pikepdf
+pymupdf
+Pillow
+google-genai
+requests
