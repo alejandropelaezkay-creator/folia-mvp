@@ -9,7 +9,6 @@ try:
     MODO_REAL = True
 except Exception as e:
     MODO_REAL = False
-    st.error(f"Error interno cargando los motores: {e}")
 
 # 1. CONFIGURACIÓN Y ESTILOS GLOBALES
 st.set_page_config(page_title="Fol.ia | Infraestructura Legal", page_icon="⚖️", layout="wide")
@@ -26,11 +25,9 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# 2. GESTIÓN DE CRÉDITOS
 if 'creditos' not in st.session_state:
     st.session_state.creditos = 2500
 
-# 3. PANEL LATERAL (SIDEBAR DASHBOARD)
 with st.sidebar:
     st.markdown("## ⚖️ Fol.ia")
     st.markdown("<span class='zdr-badge'>✓ Zero Data Retention</span>", unsafe_allow_html=True)
@@ -45,27 +42,23 @@ with st.sidebar:
     if not MODO_REAL:
         st.error("Modo Visual: Scripts de backend no detectados.")
 
-# 4. ENCABEZADO Y PROPUESTA DE VALOR (HERO SECTION)
 st.title("Automatización Documental Jurídica")
 st.markdown("""
 <div class='hero-text'>
-Erradicamos el trabajo administrativo manual de tu despacho. Fol.ia purga fojas en blanco, comprime expedientes pesados mediante OCR, y utiliza Inteligencia Artificial para indexar actuados leyendo la foliatura manuscrita del juzgado. <b>Listos para subir a Ciudadanía Digital o el SINPLU.</b>
+Erradicamos el trabajo administrativo manual de tu despacho. Fol.ia purga fojas en blanco, comprime expedientes pesados mediante OCR, y utiliza Inteligencia Artificial para renombrar documentos individuales o indexar expedientes. Listos para un archivo óptimo o su lectura por la IA.
 </div>
 """, unsafe_allow_html=True)
 
-# 5. ÁREA DE TRABAJO (TABS)
 tab1, tab2 = st.tabs(["📄 Documentos Individuales", "📚 Expedientes"])
 
-# --- MÓDULO 1: DOCUMENTOS INDIVIDUALES ---
 with tab1:
     st.markdown("### Saneamiento y Renombrado Inteligente")
-    st.write("Sube memoriales, contratos o poderes. El sistema los optimizará y aplicará reglas archivísticas estandarizadas para el nombre del archivo.")
+    st.write("El sistema optimizará el archivo y aplicará reglas archivísticas estandarizadas para el nombre.")
     
-    docs_subidos = st.file_uploader("Arrastra tus documentos PDF aquí", type="pdf", accept_multiple_files=True, key="docs")
+    docs_subidos = st.file_uploader("Sube documentos individuales (escritos, contratos o poderes)", type="pdf", accept_multiple_files=True, key="docs")
     
     if docs_subidos and st.button("Procesar Documentos", type="primary", key="btn_docs"):
         for i, arch in enumerate(docs_subidos):
-            # UX: Barra de progreso dinámica estilo SaaS
             with st.status(f"Procesando: {arch.name}", expanded=True) as status:
                 try:
                     if MODO_REAL:
@@ -90,7 +83,6 @@ with tab1:
                         os.unlink(path_in)
                         os.unlink(path_out)
                     else:
-                        # Simulador si no hay backend
                         st.write("🔍 Analizando fojas en blanco...")
                         time.sleep(1)
                         st.write("⚙️ Comprimiendo archivo...")
@@ -98,7 +90,6 @@ with tab1:
                         nombre_final = f"{arch.name.replace('.pdf', '')}_Opt.pdf"
                         pdf_bytes = b"Bytes de prueba"
                     
-                    # Cierre exitoso del componente visual
                     status.update(label=f"¡Documento optimizado: {nombre_final}!", state="complete", expanded=False)
                     st.session_state.creditos -= 15
                     
@@ -108,10 +99,9 @@ with tab1:
                     status.update(label="Fallo en el procesamiento", state="error", expanded=True)
                     st.error(f"Error técnico: {str(e)}")
 
-# --- MÓDULO 2: EXPEDIENTES MASIVOS ---
 with tab2:
     st.markdown("### Indexación por Foliatura Manuscrita")
-    st.write("Sube tomos completos devueltos por el juzgado. Fol.ia leerá los números manuscritos en la esquina superior derecha y creará un índice (marcadores) navegable por actuado procesal.")
+    st.write("Fol.ia los optimizará, leerá su contenido y creará un índice (marcadores) navegable por actuado procesal.")
     
     exp_subidos = st.file_uploader("Arrastra tus tomos o expedientes PDF", type="pdf", accept_multiple_files=True, key="exp")
     
@@ -129,7 +119,7 @@ with tab2:
                             tmp_in.write(arch.getvalue())
                             path_in, path_out = tmp_in.name, tmp_out.name
                         
-                        st.write("👁️ Gemini Vision leyendo foliatura manuscrita e inyectando marcadores...")
+                        st.write("👁️ Gemini Vision leyendo foliatura e inyectando marcadores...")
                         indx.indexar_desde_web(path_in, path_out, token_adobe)
                         
                         nombre_final = arch.name.replace('.pdf', '_Indexado.pdf')
