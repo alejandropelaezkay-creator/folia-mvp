@@ -1,67 +1,73 @@
 import streamlit as st
-import tempfile
-import os
-from pathlib import Path
 import time
 
-# Configuración de la página web
-st.set_page_config(page_title="Optimizador Legal", page_icon="⚖️", layout="centered")
+st.set_page_config(page_title="Fol.ia | MVP", page_icon="⚖️", layout="centered")
 
-st.title("⚖️ Procesador Inteligente de Expedientes")
-st.markdown("Limpia fojas en blanco, comprime vía OCR e indexa actuados judiciales automáticamente.")
+st.title("⚖️ Fol.ia")
+st.markdown("Plataforma de saneamiento e indexación para infraestructura legal.")
 
-# Simulación de saldo del usuario
 if 'creditos' not in st.session_state:
     st.session_state.creditos = 2500
 
-st.sidebar.metric(label="Créditos Disponibles (Fojas)", value=st.session_state.creditos)
+st.sidebar.metric(label="Créditos (Fojas)", value=st.session_state.creditos)
 st.sidebar.markdown("---")
-st.sidebar.markdown("**Opciones de Procesamiento**")
-usar_ocr = st.sidebar.checkbox("Aplicar OCR y Compresión Adobe", value=True)
-indexar = st.sidebar.checkbox("Generar Índice (Marcadores)", value=True)
 
-# Zona de carga de documentos
+# Selector de Flujo de Trabajo
+modo_procesamiento = st.radio(
+    "**Selecciona el tipo de carga:**",
+    [
+        "📄 Documentos Individuales (Saneamiento visual y renombrado inteligente)",
+        "📚 Expediente Completo (Saneamiento e indexación interna por foliatura)"
+    ],
+    index=0
+)
+
 archivos_subidos = st.file_uploader(
-    "Arrastra tus contratos, memoriales o poderes en PDF aquí", 
+    "Arrastra tus archivos PDF aquí", 
     type="pdf", 
     accept_multiple_files=True
 )
 
 if archivos_subidos:
-    if st.button("Procesar Archivos y Descontar Créditos", type="primary"):
-        barra_progreso = st.progress(0)
+    if st.button("Procesar y Descontar Créditos", type="primary"):
+        barra = st.progress(0)
         estado = st.empty()
-        
-        archivos_procesados = []
+        archivos_listos = []
+        fojas_totales_procesadas = 0
 
         for i, archivo in enumerate(archivos_subidos):
-            estado.text(f"Analizando: {archivo.name}...")
+            estado.text(f"Procesando: {archivo.name}...")
             
-            # Aquí se conectan tus scripts reales. 
-            # Ejemplo de flujo lógico:
-            # 1. Guardar 'archivo.getvalue()' en un tempfile.
-            # 2. fojas_validas = limpiar_paginas_blanco(tempfile)
-            # 3. if usar_ocr: procesar_pdf_completo(tempfile)
-            # 4. if indexar: indexar_archivo(tempfile)
-            # 5. nuevo_nombre = obtener_nombre_gemini(tempfile)
+            # Simulamos el tiempo de procesamiento de tus scripts
+            time.sleep(2)
+            fojas_estimadas = 20 
+            fojas_totales_procesadas += fojas_estimadas
             
-            # Simulación de tiempo de procesamiento de API
-            time.sleep(2) 
-            fojas_estimadas = 15 # Simulación de conteo
+            if "Documentos Individuales" in modo_procesamiento:
+                # AQUÍ SE CONECTA: optimizar_y_renombrar.py
+                # 1. limpiar_paginas_blanco()
+                # 2. procesar_pdf_completo() (OCR)
+                # 3. obtener_nombre_gemini()
+                nombre_final = f"{archivo.name.replace('.pdf', '')}_Renombrado.pdf"
+                
+            else:
+                # AQUÍ SE CONECTA: indexador_expediente.py
+                # 1. limpiar_paginas_blanco()
+                # 2. procesar_pdf_completo() (OCR para estabilizar)
+                # 3. indexar_archivo() (Gemini Vision lee la foliatura y crea marcadores)
+                nombre_final = f"{archivo.name.replace('.pdf', '')}_Indexado.pdf"
+                
+            archivos_listos.append(nombre_final)
+            barra.progress((i + 1) / len(archivos_subidos))
             
-            st.session_state.creditos -= fojas_estimadas
-            archivos_procesados.append(archivo.name)
-            
-            barra_progreso.progress((i + 1) / len(archivos_subidos))
-            
-        estado.success(f"✅ Procesamiento completado. Se descontaron créditos por las fojas procesadas.")
+        st.session_state.creditos -= fojas_totales_procesadas
+        estado.success(f"✅ Proceso exitoso. Se descontaron {fojas_totales_procesadas} créditos.")
         
-        # Botones de descarga para los archivos resultantes
-        st.subheader("Expedientes Listos")
-        for nombre in archivos_procesados:
+        st.subheader("Archivos Listos para Descarga")
+        for nombre in archivos_listos:
             st.download_button(
-                label=f"⬇️ Descargar {nombre.replace('.pdf', '_Optimizado.pdf')}",
-                data=b"Simulacion de bytes de PDF procesado",
-                file_name=f"{nombre.replace('.pdf', '_Optimizado.pdf')}",
+                label=f"⬇️ Descargar {nombre}",
+                data=b"Simulacion de bytes",
+                file_name=nombre,
                 mime="application/pdf"
             )
