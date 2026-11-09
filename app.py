@@ -11,7 +11,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilos personalizados para interfaz legal corporativa
+# Estilos personalizados
 st.markdown("""
 <style>
     .metric-card {
@@ -124,7 +124,12 @@ def procesar_pdf(
 # BARRA LATERAL
 # ---------------------------------------------------------
 with st.sidebar:
-    st.title("⚖️ Fol.ia")
+    # --- INTEGRACIÓN DEL LOGO ---
+    try:
+        st.image("Logo.jpg", use_container_width=True)
+    except:
+        st.title("⚖️ Fol.ia")
+        
     st.caption("Plataforma SaaS de Optimización Legal")
     
     st.metric(label="Bolsa de Créditos (Fojas)", value=f"{st.session_state.creditos:,} fojas")
@@ -146,7 +151,7 @@ with st.sidebar:
         st.text_input("Gemini API Key", type="password", help="Para renombrado automático inteligente.")
 
 # ---------------------------------------------------------
-# INTERFAZ PRINCIPAL (PESTAÑAS DE FLUJO)
+# INTERFAZ PRINCIPAL
 # ---------------------------------------------------------
 tab_docs, tab_expedientes, tab_liquidacion = st.tabs([
     "📄 A. Documentos Individuales", 
@@ -154,12 +159,11 @@ tab_docs, tab_expedientes, tab_liquidacion = st.tabs([
     "📊 Liquidación"
 ])
 
-# --- OPCIÓN A: DOCUMENTOS INDIVIDUALES (RENOMBRADO) ---
+# --- OPCIÓN A: DOCUMENTOS INDIVIDUALES ---
 with tab_docs:
     st.header("Saneamiento y Renombrado Automático")
     st.write("Ideal para memoriales, contratos o poderes sueltos. Se purgarán fojas en blanco, se optimizará el peso y se aplicará una regla de nomenclatura.")
     
-    # Configuración de Nomenclatura
     st.subheader("Regla de Nomenclatura")
     tipo_regla = st.radio(
         "Selecciona cómo nombrar los archivos resultantes:",
@@ -193,7 +197,6 @@ with tab_docs:
         resultados_docs = []
         
         for idx, arch in enumerate(archivos_docs):
-            # Aquí iría la llamada a Gemini usando 'regla_prompt'. Para este MVP nativo:
             nombre_simulado_ia = f"2026-11-09 {arch.name.replace('.pdf', '')} Optimizado"
             
             res = procesar_pdf(
@@ -213,13 +216,14 @@ with tab_docs:
         st.success("✅ Documentos procesados y renombrados.")
         for item in resultados_docs:
             c_info, c_btn = st.columns([3, 1])
-            c_info.write(f"📄 **{item['nombre_descarga']}** ({item['fojas_conservadas']} fojas)")
-            c_btn.download_button("⬇️ Descargar", data=item["bytes_resultado"], file_name=item["nombre_descarga"], mime="application/pdf", key=f"dl_{item['nombre_descarga']}")
+            texto_info = f"📄 **{item['nombre_descarga']}** ({item['fojas_conservadas']} fojas)"
+            c_info.write(texto_info)
+            c_btn.download_button("⬇️ Descargar", data=item["bytes_resultado"], file_name=item["nombre_descarga"], mime="application/pdf", key=f"dl_doc_{item['nombre_descarga']}")
 
-# --- OPCIÓN B: EXPEDIENTES (MARCADORES) ---
+# --- OPCIÓN B: EXPEDIENTES ---
 with tab_expedientes:
     st.header("Saneamiento e Indexación de Expedientes")
-    st.write("Ideal para cuadernos de prueba o tomos judiciales completos. Además de depurar y optimizar, insertará marcadores jerárquicos (índice navegable) para cada foja válida.")
+    st.write("Ideal para cuadernos de prueba o tomos judiciales completos. Insertará marcadores jerárquicos (índice navegable) para cada foja válida.")
     
     prefijo = st.text_input("Prefijo para los marcadores (opcional):", value="Foja", help="El texto que aparecerá antes del número en el panel de marcadores del PDF.")
     
@@ -248,4 +252,18 @@ with tab_expedientes:
         st.success("✅ Expedientes indexados correctamente.")
         for item in resultados_exp:
             c_info, c_btn = st.columns([3, 1])
-            c_info.write(f"📚
+            texto_info = f"📚 **{item['nombre_descarga']}** ({item['fojas_conservadas']} fojas marcadas)"
+            c_info.write(texto_info)
+            c_btn.download_button("⬇️ Descargar", data=item["bytes_resultado"], file_name=item["nombre_descarga"], mime="application/pdf", key=f"dl_exp_{item['nombre_descarga']}")
+
+# --- LIQUIDACIÓN ---
+with tab_liquidacion:
+    st.header("Liquidación de Gastos para Clientes")
+    st.write("Reporte de consumo para la rendición de cuentas del cliente del litigio.")
+
+    if st.session_state.historial_consumo:
+        st.dataframe(st.session_state.historial_consumo, use_container_width=True)
+        total_fojas_hist = sum(x["Fojas Válidas"] for x in st.session_state.historial_consumo)
+        st.metric(label="Total a Imputar a Clientes (Referencia USD)", value=f"${total_fojas_hist * 0.01:.2f} USD", delta=f"{total_fojas_hist} fojas imputables")
+    else:
+        st.info("Aún no se han procesado documentos en esta sesión.")
