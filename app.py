@@ -1,162 +1,278 @@
-import streamlit as st
-import tempfile
+import io
 import os
-import time
+import zipfile
+import streamlit as st
+from pypdf import PdfReader, PdfWriter
 
-# --- INYECCIÓN DE CLAVE SEGURA ---
-try:
-    if "GEMINI_API_KEY" in st.secrets:
-        os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
-except:
-    pass
+st.set_page_config(
+    page_title="Fol.ia | Suite Legal de Expedientes",
+    page_icon="⚖️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-try:
-    import optimizar_y_renombrar as opt
-    import indexador_expediente as indx
-    MODO_REAL = True
-except Exception as e:
-    MODO_REAL = False
-    ERROR_MSJ = str(e)
-
-# 1. CONFIGURACIÓN Y ESTILOS GLOBALES
-st.set_page_config(page_title="Fol.ia | Infraestructura Legal", page_icon="⚖️", layout="wide")
-
+# Estilos personalizados para interfaz legal corporativa
 st.markdown("""
-    <style>
-    .main { background-color: #fbfcff; }
-    h1, h2, h3 { color: #0f2537; font-family: 'Inter', sans-serif; font-weight: 700; }
-    .hero-text { font-size: 1.15rem; color: #4a5568; margin-bottom: 2rem; }
-    .stButton>button { background-color: #0f2537; color: white; border-radius: 6px; padding: 0.6rem 1.2rem; font-weight: 600; border: none; }
-    .stButton>button:hover { background-color: #1a365d; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    .metric-card { background: white; padding: 1.5rem; border-radius: 10px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-    .zdr-badge { background-color: #c6f6d5; color: #22543d; padding: 0.25rem 0.75rem; border-radius: 999px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; }
-    </style>
+<style>
+    .metric-card {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 16px;
+        border-left: 5px solid #1a365d;
+        margin-bottom: 12px;
+    }
+    .badge-success {
+        background-color: #e6fffa;
+        color: #234e52;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-if 'creditos' not in st.session_state:
-    st.session_state.creditos = 2500
+# ---------------------------------------------------------
+# GESTIÓN DE SESIÓN Y CRÉDITOS
+# ---------------------------------------------------------
+if "creditos" not in st.session_state:
+    st.session_state.creditos = 1500  # Saldo inicial demostrativo
 
-with st.sidebar:
-    # --- INTEGRACIÓN DEL LOGO ---
-    try:
-        st.image("logo.jpg", use_container_width=True)
-    except:
-        st.markdown("## ⚖️ Fol.ia")
+if "historial_consumo" not in st.session_state:
+    st.session_state.historial_consumo = []
+
+# ---------------------------------------------------------
+# FUNCIONES NATIVAS DE PROCESAMIENTO DE EXPEDIENTES (PYPDF)
+# ---------------------------------------------------------
+def analizar_expediente(pdf_bytes: bytes):
+    """Retorna número de fojas y tamaño original."""
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    return len(reader.pages), len(pdf_bytes)
+
+def es_pagina_en_blanco(page, umbral_caracteres: int = 5) -> bool:
+    """
+    Detecta si una página carece de texto e imágenes sustanciales.
+    Heurística: texto extraído menor al umbral y ausencia de XObjects (imágenes/dibujos).
+    """
+    texto = page.extract_text() or ""
+    if len(texto.strip()) > umbral_caracteres:
+        return False
+    
+    # Revisar presencia de imágenes incrustadas en recursos
+    recursos = page.get("/Resources", {})
+    xobjects = recursos.get("/XObject", {})
+    if xobjects:
+        return False
         
-    st.markdown("<span class='zdr-badge'>✓ Zero Data Retention</span>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+    return True
+
+def procesar_expediente_completo(
+    pdf_bytes: bytes,
+    nombre_archivo: str,
+    remover_blancos: bool,
+    comprimir: bool,
+    crear_marcadores: bool,
+    prefijo_marcador: str = "Foja"
+):
+    """
+    Ejecuta el pipeline completo de limpieza, indexación y compresión.
+    """
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    writer = PdfWriter()
+
+    fojas_originales = len(reader.pages)
+    fojas_conservadas = 0
+    fojas_eliminadas = 0
+
+    # Pipeline de filtrado y copia
+    for idx, page in enumerate(reader.pages):
+        foja_num = idx + 1
+        if remover_blancos and es_pagina_en_blanco(page):
+            fojas_eliminadas += 1
+            continue
+
+        writer.add_page(page)
+        fojas_conservadas += 1
+
+        if crear_marcadores:
+            # Crea un marcador jerárquico por cada foja válida procesada
+            writer.add_outline_item(
+                title=f"{prefijo_marcador} {fojas_conservadas} (Original: {foja_num})",
+                page_number=fojas_conservadas - 1
+            )
+
+    # Optimización y compresión nativa
+    if comprimir:
+        for page in writer.pages:
+            page.compress_content_streams()
+        writer.compress_identical_objects()
+
+    buffer_salida = io.BytesIO()
+    writer.write(buffer_salida)
+    bytes_optimizados = buffer_salida.getvalue()
+
+    return {
+        "nombre_original": nombre_archivo,
+        "bytes_resultado": bytes_optimizados,
+        "fojas_originales": fojas_originales,
+        "fojas_conservadas": fojas_conservadas,
+        "fojas_eliminadas": fojas_eliminadas,
+        "tamano_original_kb": len(pdf_bytes) / 1024,
+        "tamano_final_kb": len(bytes_optimizados) / 1024
+    }
+
+# ---------------------------------------------------------
+# BARRA LATERAL: CRÉDITOS Y CONFIGURACIÓN
+# ---------------------------------------------------------
+with st.sidebar:
+    st.title("⚖️ Fol.ia")
+    st.caption("Plataforma SaaS de Optimización Legal")
     
-    st.markdown("<div class='metric-card'>", unsafe_allow_html=True)
-    st.metric(label="Saldo Prepago", value=f"{st.session_state.creditos:,} fojas")
-    st.markdown("</div>", unsafe_allow_html=True)
+    # Panel de Créditos
+    st.metric(
+        label="Bolsa de Créditos (Fojas)",
+        value=f"{st.session_state.creditos:,} fojas"
+    )
     
+    with st.expander("💳 Recargar Créditos / Tarifas"):
+        st.write("**Bolsas Disponibles:**")
+        st.write("• **Litigio:** 2,500 fojas — $25 USD")
+        st.write("• **Corporativo:** 10,000 fojas — $80 USD")
+        if st.button("Simular Recarga +1,000 fojas"):
+            st.session_state.creditos += 1000
+            st.success("Recarga acreditada con éxito.")
+            st.rerun()
+
     st.markdown("---")
-    st.caption("🔒 Tus documentos son procesados en memoria asíncrona y expurgados inmediatamente tras su descarga. No usamos tus expedientes para entrenar IA.")
+    st.subheader("⚙️ Configuración del Pipeline")
     
-    if not MODO_REAL:
-        st.error(f"⚠️ Error cargando scripts: {ERROR_MSJ}")
+    opt_limpiar = st.checkbox("Depurar fojas en blanco", value=True, help="Detecta y remueve fojas escaneadas vacías.")
+    opt_comprimir = st.checkbox("Comprimir flujos y objetos", value=True, help="Reduce peso para subida a sistemas judiciales.")
+    opt_indexar = st.checkbox("Generar marcadores de fojas", value=True, help="Crea tabla de contenido estructurada para el expediente.")
+    
+    with st.expander("🛠️ Conectores de API (Avanzado)"):
+        st.text_input("Adobe PDF Services Client ID", type="password", help="Para OCR en la nube de alta precisión.")
+        st.text_input("Gemini API Key", type="password", help="Para renombrado semántico de actuados mediante IA.")
 
-st.title("Automatización Documental Jurídica")
-st.markdown("""
-<div class='hero-text'>
-Erradicamos el trabajo administrativo manual de tu despacho. Fol.ia purga fojas en blanco, comprime expedientes pesados mediante OCR, y utiliza Inteligencia Artificial para renombrar documentos individuales o indexar expedientes. Listos para un archivo óptimo o su lectura por la IA.
-</div>
-""", unsafe_allow_html=True)
+# ---------------------------------------------------------
+# INTERFAZ PRINCIPAL
+# ---------------------------------------------------------
+tab_procesar, tab_liquidacion = st.tabs(["📄 Procesamiento de Expedientes", "📊 Rendición de Gastos"])
 
-tab1, tab2 = st.tabs(["📄 Documentos Individuales", "📚 Expedientes"])
+with tab_procesar:
+    st.header("Carga y Preparación de Expedientes")
+    st.write("Arrastra memoriales, pruebas documentales o cuadernos de prueba para optimizarlos para uso judicial e IA.")
 
-with tab1:
-    st.markdown("### Saneamiento y Renombrado Inteligente")
-    st.write("El sistema optimizará el archivo y aplicará reglas archivísticas estandarizadas para el nombre.")
-    
-    docs_subidos = st.file_uploader("Sube documentos individuales (escritos, contratos o poderes)", type="pdf", accept_multiple_files=True, key="docs")
-    
-    if docs_subidos and st.button("Procesar Documentos", type="primary", key="btn_docs"):
-        for i, arch in enumerate(docs_subidos):
-            with st.status(f"Procesando: {arch.name}", expanded=True) as status:
-                try:
-                    if MODO_REAL:
-                        st.write("🔐 Autenticando motores de procesamiento...")
-                        token_adobe = opt.obtener_token_adobe()
-                        
-                        st.write("🔍 Analizando contraste y purgando fojas en blanco...")
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in, \
-                             tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
-                            tmp_in.write(arch.getvalue())
-                            path_in, path_out = tmp_in.name, tmp_out.name
-                        
-                        st.write("⚙️ Aplicando OCR y compresión estructural...")
-                        nuevo_nombre = opt.procesar_desde_web(path_in, path_out, token_adobe)
-                        
-                        st.write("🤖 Extrayendo taxonomía con Inteligencia Artificial...")
-                        if nuevo_nombre.startswith("ERROR"):
-                            st.warning(f"⚠️ IA omitida ({nuevo_nombre}). Se descargará con nombre genérico.")
-                            nombre_final = f"{arch.name.replace('.pdf', '')}_Opt.pdf"
-                        else:
-                            nombre_final = f"{nuevo_nombre}.pdf"
-                        
-                        with open(path_out, "rb") as f:
-                            pdf_bytes = f.read()
-                        
-                        os.unlink(path_in)
-                        os.unlink(path_out)
-                    else:
-                        st.write("🔍 Analizando fojas en blanco...")
-                        time.sleep(1)
-                        st.write("⚙️ Comprimiendo archivo...")
-                        time.sleep(1)
-                        nombre_final = f"{arch.name.replace('.pdf', '')}_Opt.pdf"
-                        pdf_bytes = b"Bytes de prueba"
-                    
-                    status.update(label=f"¡Documento optimizado: {nombre_final}!", state="complete", expanded=False)
-                    st.session_state.creditos -= 15
-                    
-                    st.download_button(label=f"⬇️ Descargar archivo", data=pdf_bytes, file_name=nombre_final, mime="application/pdf", key=f"dl_doc_{i}")
-                    
-                except Exception as e:
-                    status.update(label="Fallo en el procesamiento", state="error", expanded=True)
-                    st.error(f"Error técnico: {str(e)}")
+    archivos = st.file_uploader(
+        "Seleccionar expedientes en PDF",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
 
-with tab2:
-    st.markdown("### Indexación por Foliatura Manuscrita")
-    st.write("Fol.ia los optimizará, leerá su contenido y creará un índice (marcadores) navegable por actuado procesal.")
-    
-    exp_subidos = st.file_uploader("Arrastra tus tomos o expedientes PDF", type="pdf", accept_multiple_files=True, key="exp")
-    
-    if exp_subidos and st.button("Indexar Expedientes", type="primary", key="btn_exp"):
-        for i, arch in enumerate(exp_subidos):
-            with st.status(f"Mapeando Expediente: {arch.name}", expanded=True) as status_exp:
-                try:
-                    if MODO_REAL:
-                        st.write("🔐 Preparando infraestructura asíncrona...")
-                        token_adobe = indx.obtener_token_adobe()
-                        
-                        st.write("🧹 Saneando y estabilizando el documento masivo...")
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in, \
-                             tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
-                            tmp_in.write(arch.getvalue())
-                            path_in, path_out = tmp_in.name, tmp_out.name
-                        
-                        st.write("👁️ Gemini Vision leyendo foliatura e inyectando marcadores...")
-                        indx.indexar_desde_web(path_in, path_out, token_adobe)
-                        
-                        nombre_final = arch.name.replace('.pdf', '_Indexado.pdf')
-                        with open(path_out, "rb") as f:
-                            pdf_bytes = f.read()
-                            
-                        os.unlink(path_in)
-                        os.unlink(path_out)
-                    else:
-                        st.write("👁️ Simulando lectura de foliatura...")
-                        time.sleep(2)
-                        nombre_final = arch.name.replace('.pdf', '_Indexado.pdf')
-                        pdf_bytes = b"Bytes de prueba"
-                        
-                    status_exp.update(label="¡Expediente indexado con éxito!", state="complete", expanded=False)
-                    st.session_state.creditos -= 85
+    if archivos:
+        # Pre-evaluación de volumen
+        total_fojas_estimadas = 0
+        previews = []
+        for arch in archivos:
+            data = arch.getvalue()
+            num_paginas, tamano = analizar_expediente(data)
+            total_fojas_estimadas += num_paginas
+            previews.append({"Archivo": arch.name, "Fojas": num_paginas, "Tamaño (KB)": round(tamano / 1024, 1)})
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Expedientes a procesar", len(archivos))
+        col2.metric("Fojas totales estimadas", f"{total_fojas_estimadas:,}")
+        col3.metric("Consumo previsto", f"{total_fojas_estimadas:,} créditos")
+
+        if total_fojas_estimadas > st.session_state.creditos:
+            st.error("⚠️ Saldo insuficiente en tu bolsa de créditos. Recarga para continuar con el lote.")
+        else:
+            if st.button("🚀 Iniciar Procesamiento Legal", type="primary", use_container_width=True):
+                barra = st.progress(0)
+                status_txt = st.empty()
+                resultados = []
+
+                for idx, arch in enumerate(archivos):
+                    status_txt.text(f"Procesando: {arch.name}...")
+                    res = procesar_expediente_completo(
+                        pdf_bytes=arch.getvalue(),
+                        nombre_archivo=arch.name,
+                        remover_blancos=opt_limpiar,
+                        comprimir=opt_comprimir,
+                        crear_marcadores=opt_indexar
+                    )
                     
-                    st.download_button(label=f"⬇️ Descargar Expediente", data=pdf_bytes, file_name=nombre_final, mime="application/pdf", key=f"dl_exp_{i}")
+                    # Descontar créditos únicamente por fojas procesadas y conservadas
+                    consumo_real = res["fojas_conservadas"]
+                    st.session_state.creditos -= consumo_real
                     
-                except Exception as e:
-                    status_exp.update(label="Fallo en la indexación", state="error", expanded=True)
-                    st.error(f"Error técnico: {str(e)}")
+                    # Registrar en libro de liquidación para el cliente
+                    st.session_state.historial_consumo.append({
+                        "Expediente": arch.name,
+                        "Fojas Originales": res["fojas_originales"],
+                        "Fojas Válidas": res["fojas_conservadas"],
+                        "Fojas Depuradas": res["fojas_eliminadas"],
+                        "Créditos Descontados": consumo_real,
+                        "Ahorro Tamaño (%)": round((1 - (res["tamano_final_kb"] / res["tamano_original_kb"])) * 100, 1)
+                    })
+                    
+                    resultados.append(res)
+                    barra.progress((idx + 1) / len(archivos))
+
+                status_txt.success("✅ Procesamiento finalizado con éxito.")
+                st.markdown("### 📥 Descarga de Documentos Listos")
+
+                # Generar archivo ZIP consolidado si son múltiples archivos
+                if len(resultados) > 1:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        for item in resultados:
+                            nombre_descarga = item["nombre_original"].replace(".pdf", "_FolIA.pdf")
+                            zip_file.writestr(nombre_descarga, item["bytes_resultado"])
+
+                    st.download_button(
+                        label="📦 Descargar Lote Completo (.ZIP)",
+                        data=zip_buffer.getvalue(),
+                        file_name="Expedientes_Optimizados_FolIA.zip",
+                        mime="application/zip",
+                        type="primary"
+                    )
+
+                # Descargas individuales
+                for item in resultados:
+                    c_info, c_btn = st.columns([3, 1])
+                    nombre_descarga = item["nombre_original"].replace(".pdf", "_FolIA.pdf")
+                    c_info.write(
+                        f"**{nombre_descarga}** — "
+                        f"{item['fojas_conservadas']} fojas "
+                        f"({item['fojas_eliminadas']} fojas en blanco eliminadas) | "
+                        f"De {item['tamano_original_kb']:.1f} KB a {item['tamano_final_kb']:.1f} KB"
+                    )
+                    c_btn.download_button(
+                        label="⬇️ Descargar PDF",
+                        data=item["bytes_resultado"],
+                        file_name=nombre_descarga,
+                        mime="application/pdf",
+                        key=f"btn_{item['nombre_original']}"
+                    )
+
+with tab_liquidacion:
+    st.header("Liquidación de Gastos para Clientes")
+    st.write(
+        "Este reporte te permite trasladar con precisión matemática el costo de procesamiento "
+        "de expedientes a la factura o rendición de cuentas del cliente del litigio."
+    )
+
+    if st.session_state.historial_consumo:
+        st.dataframe(st.session_state.historial_consumo, use_container_width=True)
+        
+        total_fojas_hist = sum(x["Fojas Válidas"] for x in st.session_state.historial_consumo)
+        costo_unitario_foja = 0.01  # USD $0.01 por foja de referencia
+        
+        st.metric(
+            label="Total a Imputar a Clientes (Referencia USD)",
+            value=f"${total_fojas_hist * costo_unitario_foja:.2f} USD",
+            delta=f"{total_fojas_hist} fojas imputables"
+        )
+    else:
+        st.info("Aún no se han procesado expedientes en esta sesión de trabajo.")
