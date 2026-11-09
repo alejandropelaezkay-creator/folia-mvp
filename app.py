@@ -5,9 +5,12 @@ import zipfile
 import shutil
 import tempfile
 from pathlib import Path
+import requests
 import streamlit as st
 import pypdfium2 as pdfium
 from pypdf import PdfReader, PdfWriter
+import pikepdf
+from PIL import ImageStat
 from google import genai
 from google.genai import types
 
@@ -15,12 +18,8 @@ from google.genai import types
 if "GEMINI_API_KEY" in st.secrets:
     os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
 
-try:
-    import optimizar_y_renombrar as opt
-    MODO_REAL = True
-except Exception as e:
-    MODO_REAL = False
-    ERROR_MSJ = str(e)
+CLIENT_ID = st.secrets.get("PDF_SERVICES_CLIENT_ID", "47ecbefd40624c578b1d84362ffda6c7")
+CLIENT_SECRET = st.secrets.get("PDF_SERVICES_CLIENT_SECRET", "p8e-71yKV_apZKh_1XSSNr5aydixYIAar3F8")
 
 # 1. CONFIGURACIÓN Y ESTILOS
 st.set_page_config(page_title="Fol.ia | Suite Legal de Expedientes", page_icon="⚖️", layout="wide", initial_sidebar_state="expanded")
@@ -37,8 +36,27 @@ if "creditos" not in st.session_state:
 if "historial_consumo" not in st.session_state:
     st.session_state.historial_consumo = []
 
-# 2. MOTORES CLOUD (ADOBE OCR + GEMINI IA)
-def procesar_expediente_nube(pdf_bytes, token_adobe, prefijo_marcador=None, aplicar_limpieza=True):
+# 2. MOTORES CLOUD INTEGRADOS
+def purgar_blancos(input_path, output_path):
+    doc_vis = pdfium.PdfDocument(str(input_path))
+    doc_save = pikepdf.open(str(input_path))
+    valid = []
+    for i in range(len(doc_vis)):
+        bmp = doc_vis[i].render(scale=0.25)
+        img = bmp.to_pil().convert("L")
+        if ImageStat.Stat(img).stddev[0] > 1.5:
+            valid.append(doc_save.pages[i])
+    
+    if valid:
+        out = pikepdf.new()
+        out.pages.extend(valid)
+        out.save(str(output_path))
+    else:
+        doc_save.save(str(output_path))
+    doc_vis.close()
+    doc_save.close()
+
+def procesar_expediente_nube(pdf_bytes, prefijo_marcador=None, aplicar_limpieza=True):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t_in, \
          tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t_temp, \
          tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t_out:
@@ -52,27 +70,51 @@ def procesar_expediente_nube(pdf_bytes, token_adobe, prefijo_marcador=None, apli
         reader_orig = PdfReader(path_in)
         fojas_originales = len(reader_orig.pages)
         
+        # 1. Depuración antes de Adobe
         if aplicar_limpieza:
-            opt.limpiar_paginas_blanco(path_in, path_temp)
+            purgar_blancos(path_in, path_temp)
         else:
             shutil.copy(path_in, path_temp)
             
-        # OCR en Adobe
-        opt.procesar_bloque_adobe(str(path_temp), str(path_out), token_adobe)
+        # 2. Procesamiento en Adobe PDF Services
+        r_token = requests.post("https://pdf-services.adobe.io/token", data={"client_id": CLIENT_ID, "client_secret": CLIENT_SECRET}, headers={"Content-Type": "application/x-www-form-urlencoded"})
+        token = r_token.json()["access_token"]
+        hdr = {"x-api-key": CLIENT_ID, "Authorization": f"Bearer {token}"}
         
-        # RECONSTRUCCIÓN: Repara fuentes corruptas de CamScanner/Adobe y añade marcadores
-        reader_final = PdfReader(path_out)
-        fojas_conservadas = len(reader_final.pages)
+        up_res = requests.post("https://pdf-services.adobe.io/assets", headers={**hdr, "Content-Type": "application/json"}, json={"mediaType": "application/pdf"}).json()
+        with open(path_temp, "rb") as f:
+            requests.put(up_res["uploadUri"], data=f, headers={"Content-Type": "application/pdf"}).raise_for_status()
         
-        writer = PdfWriter()
-        writer.append_pages_from_reader(reader_final)
+        ocr_r = requests.post("https://pdf-services.adobe.io/operation/ocr", headers={**hdr, "Content-Type": "application/json"}, json={"assetID": up_res["assetID"], "ocrType": "searchable_image", "ocrLang": "es-ES"})
+        while True:
+            st_ocr = requests.get(ocr_r.headers["location"], headers=hdr).json()
+            if st_ocr.get("status") == "done":
+                asset_ocr = st_ocr["asset"]["assetID"]
+                break
+            time.sleep(2)
+            
+        cmp_r = requests.post("https://pdf-services.adobe.io/operation/compresspdf", headers={**hdr, "Content-Type": "application/json"}, json={"assetID": asset_ocr, "compressionLevel": "HIGH"})
+        while True:
+            st_c = requests.get(cmp_r.headers["location"], headers=hdr).json()
+            if st_c.get("status") == "done":
+                with open(path_out, "wb") as f:
+                    f.write(requests.get(st_c["asset"]["downloadUri"]).content)
+                break
+            time.sleep(2)
         
+        # 3. Marcadores opcionales (Solo para expedientes)
         if prefijo_marcador:
+            reader_final = PdfReader(path_out)
+            fojas_conservadas = len(reader_final.pages)
+            writer = PdfWriter()
+            writer.append_pages_from_reader(reader_final)
             for i in range(fojas_conservadas):
                 writer.add_outline_item(f"{prefijo_marcador} {i+1}", i)
-                
-        with open(path_out, "wb") as f:
-            writer.write(f)
+            with open(path_out, "wb") as f:
+                writer.write(f)
+        else:
+            reader_final = PdfReader(path_out)
+            fojas_conservadas = len(reader_final.pages)
             
         with open(path_out, "rb") as f:
             bytes_finales = f.read()
@@ -81,31 +123,37 @@ def procesar_expediente_nube(pdf_bytes, token_adobe, prefijo_marcador=None, apli
             "bytes": bytes_finales,
             "fojas_originales": fojas_originales,
             "fojas_conservadas": fojas_conservadas,
-            "fojas_eliminadas": fojas_originales - fojas_conservadas,
-            "tamano_orig_kb": len(pdf_bytes) / 1024,
-            "tamano_final_kb": len(bytes_finales) / 1024
         }
     finally:
         for p in [path_in, path_temp, path_out]:
             if p.exists(): p.unlink()
 
 def obtener_nombre_ia(pdf_bytes, regla_prompt):
+    texto = ""
+    # Extracción doble para garantizar la lectura de Adobe
     try:
-        # pypdfium2 ignora errores de fuente y fuerza la extracción de texto
         pdf = pdfium.PdfDocument(pdf_bytes)
-        texto_extraido = []
         for i in range(min(4, len(pdf))):
-            texto_extraido.append(pdf[i].get_textpage().get_text_range()[:1500])
-        texto = "".join(texto_extraido)
+            texto += pdf[i].get_textpage().get_text_range() + "\n"
         pdf.close()
+    except:
+        pass
+    
+    if len(texto.strip()) < 15:
+        try:
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            for i in range(min(4, len(reader.pages))):
+                texto += reader.pages[i].extract_text() + "\n"
+        except:
+            pass
+
+    if len(texto.strip()) < 15:
+        return "ERROR_TEXTO_ILEGIBLE"
         
-        if len(texto.strip()) < 15:
-            return "ERROR_TEXTO_ILEGIBLE"
-            
+    try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         prompt = f"Regla de nomenclatura estricta a seguir: {regla_prompt}\n\nAplica esta regla al siguiente texto documental y devuelve SOLO el nombre del archivo resultante sin extensión ni explicaciones:\n\n{texto}"
         
-        # ACTULIZADO A LA ÚLTIMA VERSIÓN DEL MODELO (gemini-3.8-flash)
         res = client.models.generate_content(
             model='gemini-3.8-flash',
             contents=prompt,
@@ -125,7 +173,7 @@ with st.sidebar:
     except:
         st.title("⚖️ Fol.ia")
         
-    st.caption("Plataforma SaaS de Optimización Legal")
+    st.caption("Tus documentos listos para el archivo y la Inteligencia Artificial.")
     st.metric(label="Bolsa de Créditos (Fojas)", value=f"{st.session_state.creditos:,} fojas")
     
     with st.expander("💳 Recargar Créditos / Tarifas"):
@@ -138,9 +186,6 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("⚙️ Configuración Global")
     opt_limpiar = st.checkbox("Depurar fojas en blanco", value=True, help="Remueve fojas escaneadas vacías en ambos flujos.")
-    
-    if not MODO_REAL:
-        st.error(f"Falla de conexión backend: {ERROR_MSJ}")
 
 # 4. ÁREA DE TRABAJO
 tab_docs, tab_expedientes, tab_liquidacion = st.tabs([
@@ -165,7 +210,7 @@ with tab_docs:
         • Contratos: YYYY-MM-DD [ENTIDAD] CONTR [Tipo] [Contraparte]<br>
         </div>
         """, unsafe_allow_html=True)
-        regla_prompt = "Usa el estándar: YYYY-MM-DD [Nombre], [Acción/Detalle]"
+        regla_prompt = "Usa el estándar legal: YYYY-MM-DD [Nombre], [Acción/Detalle]"
     else:
         st.text_input("✨ Instrucciones de Nomenclatura (Funciona con Inteligencia Artificial):", placeholder="Ej: Extraer la fecha y el nombre del cliente en mayúsculas...", key="regla_ia")
         regla_prompt = st.session_state.get("regla_ia", "")
@@ -176,31 +221,27 @@ with tab_docs:
     if archivos_docs and st.button("🚀 Procesar y Renombrar", type="primary"):
         for idx, arch in enumerate(archivos_docs):
             with st.status(f"Procesando: {arch.name}", expanded=True) as status:
-                if MODO_REAL:
-                    try:
-                        st.write("🔐 Conectando con motores de procesamiento...")
-                        token_adobe = opt.obtener_token_adobe()
-                        
-                        st.write("⚙️ Limpiando fojas, reestructurando fuentes y aplicando OCR...")
-                        res = procesar_expediente_nube(arch.getvalue(), token_adobe, aplicar_limpieza=opt_limpiar)
-                        
-                        st.write("🤖 Analizando texto con IA...")
-                        nombre_ia = obtener_nombre_ia(res["bytes"], regla_prompt)
-                        
-                        if nombre_ia and not nombre_ia.startswith("ERROR"):
-                            nombre_final = f"{nombre_ia}.pdf"
-                        else:
-                            st.warning(f"⚠️ Renombrado omitido ({nombre_ia}). Usando nombre genérico.")
-                            nombre_final = f"{arch.name.replace('.pdf', '')}_FolIA.pdf"
-                        
-                        st.session_state.creditos -= res["fojas_conservadas"]
-                        st.session_state.historial_consumo.append({"Expediente": nombre_final, "Fojas Válidas": res["fojas_conservadas"], "Créditos": res["fojas_conservadas"], "Tipo": "Documento"})
-                        
-                        status.update(label=f"¡Optimizado: {nombre_final}!", state="complete", expanded=False)
-                        st.download_button("⬇️ Descargar", data=res["bytes"], file_name=nombre_final, mime="application/pdf", key=f"dl_doc_{idx}")
-                    except Exception as e:
-                        status.update(label="Fallo en la nube", state="error", expanded=True)
-                        st.error(f"Error técnico: {e}")
+                try:
+                    st.write("⚙️ Limpiando fojas y aplicando OCR nativo...")
+                    res = procesar_expediente_nube(arch.getvalue(), prefijo_marcador=None, aplicar_limpieza=opt_limpiar)
+                    
+                    st.write("🤖 Analizando texto con IA...")
+                    nombre_ia = obtener_nombre_ia(res["bytes"], regla_prompt)
+                    
+                    if nombre_ia and not nombre_ia.startswith("ERROR"):
+                        nombre_final = f"{nombre_ia}.pdf"
+                    else:
+                        st.warning(f"⚠️ Renombrado omitido ({nombre_ia}). Usando nombre genérico.")
+                        nombre_final = f"{arch.name.replace('.pdf', '')}_FolIA.pdf"
+                    
+                    st.session_state.creditos -= res["fojas_conservadas"]
+                    st.session_state.historial_consumo.append({"Expediente": nombre_final, "Fojas Válidas": res["fojas_conservadas"], "Créditos": res["fojas_conservadas"], "Tipo": "Documento"})
+                    
+                    status.update(label=f"¡Optimizado: {nombre_final}!", state="complete", expanded=False)
+                    st.download_button("⬇️ Descargar", data=res["bytes"], file_name=nombre_final, mime="application/pdf", key=f"dl_doc_{idx}")
+                except Exception as e:
+                    status.update(label="Fallo en la nube", state="error", expanded=True)
+                    st.error(f"Error técnico: {e}")
 
 # --- OPCIÓN B: EXPEDIENTES ---
 with tab_expedientes:
@@ -213,23 +254,19 @@ with tab_expedientes:
     if archivos_exp and st.button("🚀 Procesar e Indexar", type="primary"):
         for idx, arch in enumerate(archivos_exp):
             with st.status(f"Estructurando: {arch.name}", expanded=True) as status_exp:
-                if MODO_REAL:
-                    try:
-                        st.write("🔐 Conectando con motores de procesamiento...")
-                        token_adobe = opt.obtener_token_adobe()
-                        
-                        st.write("⚙️ Comprimiendo e inyectando marcadores...")
-                        res = procesar_expediente_nube(arch.getvalue(), token_adobe, prefijo_marcador=prefijo, aplicar_limpieza=opt_limpiar)
-                        nombre_final = arch.name.replace(".pdf", "_Indexado.pdf")
-                        
-                        st.session_state.creditos -= res["fojas_conservadas"]
-                        st.session_state.historial_consumo.append({"Expediente": nombre_final, "Fojas Válidas": res["fojas_conservadas"], "Créditos": res["fojas_conservadas"], "Tipo": "Expediente"})
-                        
-                        status_exp.update(label="¡Expediente indexado con éxito!", state="complete", expanded=False)
-                        st.download_button("⬇️ Descargar", data=res["bytes"], file_name=nombre_final, mime="application/pdf", key=f"dl_exp_{idx}")
-                    except Exception as e:
-                        status_exp.update(label="Fallo en la indexación", state="error", expanded=True)
-                        st.error(f"Error técnico: {e}")
+                try:
+                    st.write("⚙️ Comprimiendo e inyectando marcadores...")
+                    res = procesar_expediente_nube(arch.getvalue(), prefijo_marcador=prefijo, aplicar_limpieza=opt_limpiar)
+                    nombre_final = arch.name.replace(".pdf", "_Indexado.pdf")
+                    
+                    st.session_state.creditos -= res["fojas_conservadas"]
+                    st.session_state.historial_consumo.append({"Expediente": nombre_final, "Fojas Válidas": res["fojas_conservadas"], "Créditos": res["fojas_conservadas"], "Tipo": "Expediente"})
+                    
+                    status_exp.update(label="¡Expediente indexado con éxito!", state="complete", expanded=False)
+                    st.download_button("⬇️ Descargar", data=res["bytes"], file_name=nombre_final, mime="application/pdf", key=f"dl_exp_{idx}")
+                except Exception as e:
+                    status_exp.update(label="Fallo en la indexación", state="error", expanded=True)
+                    st.error(f"Error técnico: {e}")
 
 # --- LIQUIDACIÓN ---
 with tab_liquidacion:
