@@ -1,141 +1,124 @@
 import io
 import os
+import re
 import zipfile
+import shutil
+import tempfile
+from pathlib import Path
 import streamlit as st
-from pypdf import PdfReader, PdfWriter
+import pymupdf as fitz
+from google import genai
+from google.genai import types
 
-st.set_page_config(
-    page_title="Fol.ia | Suite Legal de Expedientes",
-    page_icon="⚖️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# --- CONEXIÓN SEGURA A MOTORES (VÍA SECRETS) ---
+if "GEMINI_API_KEY" in st.secrets:
+    os.environ["GEMINI_API_KEY"] = st.secrets["GEMINI_API_KEY"]
 
-# Estilos personalizados
+try:
+    import optimizar_y_renombrar as opt
+    MODO_REAL = True
+except Exception as e:
+    MODO_REAL = False
+    ERROR_MSJ = str(e)
+
+# 1. CONFIGURACIÓN Y ESTILOS
+st.set_page_config(page_title="Fol.ia | Suite Legal de Expedientes", page_icon="⚖️", layout="wide", initial_sidebar_state="expanded")
+
 st.markdown("""
 <style>
-    .metric-card {
-        background-color: #f8f9fa;
-        border-radius: 8px;
-        padding: 16px;
-        border-left: 5px solid #1a365d;
-        margin-bottom: 12px;
-    }
-    .badge-success {
-        background-color: #e6fffa;
-        color: #234e52;
-        padding: 4px 8px;
-        border-radius: 4px;
-        font-weight: 600;
-        font-size: 0.85rem;
-    }
-    .guia-nomenclatura {
-        background-color: #f1f3f5;
-        padding: 10px;
-        border-radius: 5px;
-        font-family: monospace;
-        font-size: 0.9em;
-        color: #495057;
-    }
+    .metric-card { background-color: #f8f9fa; border-radius: 8px; padding: 16px; border-left: 5px solid #1a365d; margin-bottom: 12px; }
+    .guia-nomenclatura { background-color: #f1f3f5; padding: 10px; border-radius: 5px; font-family: monospace; font-size: 0.9em; color: #495057; }
 </style>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# GESTIÓN DE SESIÓN Y CRÉDITOS
-# ---------------------------------------------------------
 if "creditos" not in st.session_state:
     st.session_state.creditos = 1500
-
 if "historial_consumo" not in st.session_state:
     st.session_state.historial_consumo = []
 
-# ---------------------------------------------------------
-# FUNCIONES NATIVAS DE PROCESAMIENTO
-# ---------------------------------------------------------
-def analizar_expediente(pdf_bytes: bytes):
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    return len(reader.pages), len(pdf_bytes)
+# 2. MOTORES CLOUD (ADOBE OCR + GEMINI IA)
+def procesar_expediente_nube(pdf_bytes, token_adobe, prefijo_marcador=None, aplicar_limpieza=True):
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t_in, \
+         tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t_temp, \
+         tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as t_out:
+         
+        t_in.write(pdf_bytes)
+        path_in = Path(t_in.name)
+        path_temp = Path(t_temp.name)
+        path_out = Path(t_out.name)
+        
+    try:
+        doc_orig = fitz.open(str(path_in))
+        fojas_originales = len(doc_orig)
+        doc_orig.close()
+        
+        if aplicar_limpieza:
+            opt.limpiar_paginas_blanco(path_in, path_temp)
+        else:
+            shutil.copy(path_in, path_temp)
+            
+        opt.procesar_bloque_adobe(str(path_temp), str(path_out), token_adobe)
+        
+        doc_final = fitz.open(str(path_out))
+        fojas_conservadas = len(doc_final)
+        
+        if prefijo_marcador:
+            toc = [[1, f"{prefijo_marcador} {i+1}", i+1] for i in range(fojas_conservadas)]
+            doc_final.set_toc(toc)
+            doc_final.saveIncr()
+            
+        with open(path_out, "rb") as f:
+            bytes_finales = f.read()
+        doc_final.close()
+        
+        return {
+            "bytes": bytes_finales,
+            "fojas_originales": fojas_originales,
+            "fojas_conservadas": fojas_conservadas,
+            "fojas_eliminadas": fojas_originales - fojas_conservadas,
+            "tamano_orig_kb": len(pdf_bytes) / 1024,
+            "tamano_final_kb": len(bytes_finales) / 1024
+        }
+    finally:
+        for p in [path_in, path_temp, path_out]:
+            if p.exists(): p.unlink()
 
-def es_pagina_en_blanco(page, umbral_caracteres: int = 5) -> bool:
-    texto = page.extract_text() or ""
-    if len(texto.strip()) > umbral_caracteres:
-        return False
-    recursos = page.get("/Resources", {})
-    xobjects = recursos.get("/XObject", {})
-    if xobjects:
-        return False
-    return True
+def obtener_nombre_ia(pdf_bytes, regla_prompt):
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        texto_extraido = [page.get_text()[:1500] for page in doc[:4]]
+        doc.close()
+        texto = "".join(texto_extraido)
+        
+        if len(texto.strip()) < 20:
+            return None
+            
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+        prompt = f"Regla de nomenclatura estricta a seguir: {regla_prompt}\n\nAplica esta regla al siguiente texto documental y devuelve SOLO el nombre del archivo resultante sin extensión ni explicaciones:\n\n{texto}"
+        
+        res = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.1)
+        )
+        if res.text:
+            limpio = res.text.strip().replace("\n", "")
+            return re.sub(r'[\\/*?:"<>|]', '-', limpio)[:120]
+        return None
+    except Exception as e:
+        return None
 
-def procesar_pdf(
-    pdf_bytes: bytes,
-    nombre_archivo: str,
-    remover_blancos: bool,
-    comprimir: bool,
-    crear_marcadores: bool = False,
-    prefijo_marcador: str = "Foja",
-    nuevo_nombre: str = None
-):
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    writer = PdfWriter()
-
-    fojas_originales = len(reader.pages)
-    fojas_conservadas = 0
-    fojas_eliminadas = 0
-
-    for idx, page in enumerate(reader.pages):
-        foja_num = idx + 1
-        if remover_blancos and es_pagina_en_blanco(page):
-            fojas_eliminadas += 1
-            continue
-
-        writer.add_page(page)
-        fojas_conservadas += 1
-
-        if crear_marcadores:
-            writer.add_outline_item(
-                title=f"{prefijo_marcador} {fojas_conservadas} (Original: {foja_num})",
-                page_number=fojas_conservadas - 1
-            )
-
-    if comprimir:
-        for page in writer.pages:
-            page.compress_content_streams()
-        writer.compress_identical_objects()
-
-    buffer_salida = io.BytesIO()
-    writer.write(buffer_salida)
-    bytes_optimizados = buffer_salida.getvalue()
-    
-    nombre_final = nuevo_nombre if nuevo_nombre else nombre_archivo.replace(".pdf", "_FolIA.pdf")
-    if not nombre_final.endswith(".pdf"):
-        nombre_final += ".pdf"
-
-    return {
-        "nombre_descarga": nombre_final,
-        "bytes_resultado": bytes_optimizados,
-        "fojas_originales": fojas_originales,
-        "fojas_conservadas": fojas_conservadas,
-        "fojas_eliminadas": fojas_eliminadas,
-        "tamano_original_kb": len(pdf_bytes) / 1024,
-        "tamano_final_kb": len(bytes_optimizados) / 1024
-    }
-
-# ---------------------------------------------------------
-# BARRA LATERAL
-# ---------------------------------------------------------
+# 3. BARRA LATERAL
 with st.sidebar:
-    # --- INTEGRACIÓN DEL LOGO ---
     try:
         st.image("Logo.jpg", use_container_width=True)
     except:
         st.title("⚖️ Fol.ia")
         
     st.caption("Plataforma SaaS de Optimización Legal")
-    
     st.metric(label="Bolsa de Créditos (Fojas)", value=f"{st.session_state.creditos:,} fojas")
     
     with st.expander("💳 Recargar Créditos / Tarifas"):
-        st.write("**Bolsas Disponibles:**")
         st.write("• **Litigio:** 2,500 fojas — $25 USD")
         st.write("• **Corporativo:** 10,000 fojas — $80 USD")
         if st.button("Simular Recarga +1,000 fojas"):
@@ -145,33 +128,24 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("⚙️ Configuración Global")
     opt_limpiar = st.checkbox("Depurar fojas en blanco", value=True, help="Remueve fojas escaneadas vacías en ambos flujos.")
-    opt_comprimir = st.checkbox("Comprimir tamaño", value=True, help="Reduce peso para subida a sistemas judiciales.")
     
-    with st.expander("🤖 Motores IA (Opcional)"):
-        st.text_input("Gemini API Key", type="password", help="Para renombrado automático inteligente.")
+    if not MODO_REAL:
+        st.error(f"Falla de conexión backend: {ERROR_MSJ}")
 
-# ---------------------------------------------------------
-# INTERFAZ PRINCIPAL
-# ---------------------------------------------------------
+# 4. ÁREA DE TRABAJO
 tab_docs, tab_expedientes, tab_liquidacion = st.tabs([
     "📄 A. Documentos Individuales", 
     "📚 B. Expedientes (Marcadores)", 
     "📊 Liquidación"
 ])
 
-# --- OPCIÓN A: DOCUMENTOS INDIVIDUALES ---
+# --- OPCIÓN A: DOCUMENTOS ---
 with tab_docs:
     st.header("Saneamiento y Renombrado Automático")
-    st.write("Ideal para memoriales, contratos o poderes sueltos. Se purgarán fojas en blanco, se optimizará el peso y se aplicará una regla de nomenclatura.")
+    st.write("Ideal para memoriales y contratos. Se aplicará OCR, se purgarán blancos y la IA aplicará tu regla.")
     
-    st.subheader("Regla de Nomenclatura")
-    tipo_regla = st.radio(
-        "Selecciona cómo nombrar los archivos resultantes:",
-        options=["Predeterminada del sistema", "Personalizada"],
-        horizontal=True
-    )
+    tipo_regla = st.radio("Selecciona la regla de nomenclatura:", ["Predeterminada del sistema", "Personalizada"], horizontal=True)
     
-    regla_prompt = ""
     if tipo_regla == "Predeterminada del sistema":
         st.markdown("""
         <div class="guia-nomenclatura">
@@ -179,91 +153,74 @@ with tab_docs:
         • Notariales: YYYY-MM-DD inst. [Nro] [Detalle]<br>
         • Judiciales: YYYY-MM-DD [Fs. Rango] [Nombre], [Acción]<br>
         • Contratos: YYYY-MM-DD [ENTIDAD] CONTR [Tipo] [Contraparte]<br>
-        <i>Ejemplo: 2026-10-15 Fs. 12-15 Perez, Contesta Demanda.pdf</i>
         </div>
         """, unsafe_allow_html=True)
-        regla_prompt = "Usa el estándar legal: YYYY-MM-DD [Nombre], [Acción/Detalle]"
+        regla_prompt = "Usa el estándar: YYYY-MM-DD [Nombre], [Acción/Detalle]"
     else:
-        regla_prompt = st.text_input(
-            "Escribe tus instrucciones para la Inteligencia Artificial:", 
-            placeholder="Ej: Solo pon la fecha y el nombre del cliente en mayúsculas..."
-        )
+        regla_prompt = st.text_input("Instrucciones para la IA:", placeholder="Ej: Solo la fecha y el nombre del cliente en mayúsculas...")
     
     st.divider()
     archivos_docs = st.file_uploader("Arrastra documentos individuales", type=["pdf"], accept_multiple_files=True, key="up_docs")
     
-    if archivos_docs and st.button("🚀 Procesar y Renombrar", type="primary", use_container_width=True):
-        barra = st.progress(0)
-        resultados_docs = []
-        
+    if archivos_docs and st.button("🚀 Procesar y Renombrar", type="primary"):
         for idx, arch in enumerate(archivos_docs):
-            nombre_simulado_ia = f"2026-11-09 {arch.name.replace('.pdf', '')} Optimizado"
-            
-            res = procesar_pdf(
-                pdf_bytes=arch.getvalue(),
-                nombre_archivo=arch.name,
-                remover_blancos=opt_limpiar,
-                comprimir=opt_comprimir,
-                crear_marcadores=False,
-                nuevo_nombre=nombre_simulado_ia
-            )
-            
-            st.session_state.creditos -= res["fojas_conservadas"]
-            st.session_state.historial_consumo.append({"Expediente": arch.name, "Fojas Válidas": res["fojas_conservadas"], "Créditos Descontados": res["fojas_conservadas"], "Tipo": "Documento"})
-            resultados_docs.append(res)
-            barra.progress((idx + 1) / len(archivos_docs))
-            
-        st.success("✅ Documentos procesados y renombrados.")
-        for item in resultados_docs:
-            c_info, c_btn = st.columns([3, 1])
-            texto_info = f"📄 **{item['nombre_descarga']}** ({item['fojas_conservadas']} fojas)"
-            c_info.write(texto_info)
-            c_btn.download_button("⬇️ Descargar", data=item["bytes_resultado"], file_name=item["nombre_descarga"], mime="application/pdf", key=f"dl_doc_{item['nombre_descarga']}")
+            with st.status(f"Procesando: {arch.name}", expanded=True) as status:
+                if MODO_REAL:
+                    try:
+                        st.write("🔐 Conectando con motores de procesamiento...")
+                        token_adobe = opt.obtener_token_adobe()
+                        
+                        st.write("⚙️ Limpiando fojas y aplicando OCR/Compresión...")
+                        res = procesar_expediente_nube(arch.getvalue(), token_adobe, aplicar_limpieza=opt_limpiar)
+                        
+                        st.write("🤖 Analizando texto con IA...")
+                        nombre_ia = obtener_nombre_ia(res["bytes"], regla_prompt)
+                        nombre_final = f"{nombre_ia}.pdf" if nombre_ia else f"{arch.name.replace('.pdf', '')}_FolIA.pdf"
+                        
+                        st.session_state.creditos -= res["fojas_conservadas"]
+                        st.session_state.historial_consumo.append({"Expediente": nombre_final, "Fojas Válidas": res["fojas_conservadas"], "Créditos": res["fojas_conservadas"], "Tipo": "Documento"})
+                        
+                        status.update(label=f"¡Optimizado: {nombre_final}!", state="complete", expanded=False)
+                        st.download_button("⬇️ Descargar", data=res["bytes"], file_name=nombre_final, mime="application/pdf", key=f"dl_doc_{idx}")
+                    except Exception as e:
+                        status.update(label="Fallo en la nube", state="error", expanded=True)
+                        st.error(f"Error técnico: {e}")
 
 # --- OPCIÓN B: EXPEDIENTES ---
 with tab_expedientes:
     st.header("Saneamiento e Indexación de Expedientes")
-    st.write("Ideal para cuadernos de prueba o tomos judiciales completos. Insertará marcadores jerárquicos (índice navegable) para cada foja válida.")
+    st.write("Se depurarán blancos, se aplicará OCR pesado y se insertarán marcadores jerárquicos (índice navegable).")
     
-    prefijo = st.text_input("Prefijo para los marcadores (opcional):", value="Foja", help="El texto que aparecerá antes del número en el panel de marcadores del PDF.")
-    
-    st.divider()
+    prefijo = st.text_input("Prefijo para los marcadores (opcional):", value="Foja")
     archivos_exp = st.file_uploader("Arrastra tomos de expedientes", type=["pdf"], accept_multiple_files=True, key="up_exp")
     
-    if archivos_exp and st.button("🚀 Procesar e Indexar", type="primary", use_container_width=True):
-        barra = st.progress(0)
-        resultados_exp = []
-        
+    if archivos_exp and st.button("🚀 Procesar e Indexar", type="primary"):
         for idx, arch in enumerate(archivos_exp):
-            res = procesar_pdf(
-                pdf_bytes=arch.getvalue(),
-                nombre_archivo=arch.name,
-                remover_blancos=opt_limpiar,
-                comprimir=opt_comprimir,
-                crear_marcadores=True,
-                prefijo_marcador=prefijo
-            )
-            
-            st.session_state.creditos -= res["fojas_conservadas"]
-            st.session_state.historial_consumo.append({"Expediente": arch.name, "Fojas Válidas": res["fojas_conservadas"], "Créditos Descontados": res["fojas_conservadas"], "Tipo": "Expediente"})
-            resultados_exp.append(res)
-            barra.progress((idx + 1) / len(archivos_exp))
-            
-        st.success("✅ Expedientes indexados correctamente.")
-        for item in resultados_exp:
-            c_info, c_btn = st.columns([3, 1])
-            texto_info = f"📚 **{item['nombre_descarga']}** ({item['fojas_conservadas']} fojas marcadas)"
-            c_info.write(texto_info)
-            c_btn.download_button("⬇️ Descargar", data=item["bytes_resultado"], file_name=item["nombre_descarga"], mime="application/pdf", key=f"dl_exp_{item['nombre_descarga']}")
+            with st.status(f"Estructurando: {arch.name}", expanded=True) as status_exp:
+                if MODO_REAL:
+                    try:
+                        st.write("🔐 Conectando con motores de procesamiento...")
+                        token_adobe = opt.obtener_token_adobe()
+                        
+                        st.write("⚙️ Comprimiendo e inyectando marcadores...")
+                        res = procesar_expediente_nube(arch.getvalue(), token_adobe, prefijo_marcador=prefijo, aplicar_limpieza=opt_limpiar)
+                        nombre_final = arch.name.replace(".pdf", "_Indexado.pdf")
+                        
+                        st.session_state.creditos -= res["fojas_conservadas"]
+                        st.session_state.historial_consumo.append({"Expediente": nombre_final, "Fojas Válidas": res["fojas_conservadas"], "Créditos": res["fojas_conservadas"], "Tipo": "Expediente"})
+                        
+                        status_exp.update(label="¡Expediente indexado con éxito!", state="complete", expanded=False)
+                        st.download_button("⬇️ Descargar", data=res["bytes"], file_name=nombre_final, mime="application/pdf", key=f"dl_exp_{idx}")
+                    except Exception as e:
+                        status_exp.update(label="Fallo en la indexación", state="error", expanded=True)
+                        st.error(f"Error técnico: {e}")
 
 # --- LIQUIDACIÓN ---
 with tab_liquidacion:
     st.header("Liquidación de Gastos para Clientes")
-    st.write("Reporte de consumo para la rendición de cuentas del cliente del litigio.")
-
     if st.session_state.historial_consumo:
         st.dataframe(st.session_state.historial_consumo, use_container_width=True)
         total_fojas_hist = sum(x["Fojas Válidas"] for x in st.session_state.historial_consumo)
         st.metric(label="Total a Imputar a Clientes (Referencia USD)", value=f"${total_fojas_hist * 0.01:.2f} USD", delta=f"{total_fojas_hist} fojas imputables")
     else:
-        st.info("Aún no se han procesado documentos en esta sesión.")
+        st.info("Aún no se han procesado documentos.")
