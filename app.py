@@ -157,7 +157,7 @@ with tab_docs:
         """, unsafe_allow_html=True)
         regla_prompt = "Usa el estándar: YYYY-MM-DD [Nombre], [Acción/Detalle]"
     else:
-        regla_prompt = st.text_input("Instrucciones para la IA:", placeholder="Ej: Solo la fecha y el nombre del cliente en mayúsculas...")
+        regla_prompt = st.text_input("✨ Instrucciones de Nomenclatura (Funciona con Inteligencia Artificial):", placeholder="Ej: Extraer la fecha y el nombre del cliente en mayúsculas...")
     
     st.divider()
     archivos_docs = st.file_uploader("Arrastra documentos individuales", type=["pdf"], accept_multiple_files=True, key="up_docs")
