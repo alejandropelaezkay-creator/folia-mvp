@@ -1,7 +1,2 @@
-streamlit
-pypdfium2
-pikepdf
-pymupdf
-Pillow
-google-genai
-requests
+streamlit>=1.35.0
+pypdf>=4.2.0
