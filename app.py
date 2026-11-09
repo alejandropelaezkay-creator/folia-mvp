@@ -105,8 +105,9 @@ def obtener_nombre_ia(pdf_bytes, regla_prompt):
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         prompt = f"Regla de nomenclatura estricta a seguir: {regla_prompt}\n\nAplica esta regla al siguiente texto documental y devuelve SOLO el nombre del archivo resultante sin extensión ni explicaciones:\n\n{texto}"
         
+        # ACTULIZADO A LA ÚLTIMA VERSIÓN DEL MODELO (gemini-3.8-flash)
         res = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.8-flash',
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.1)
         )
@@ -166,7 +167,8 @@ with tab_docs:
         """, unsafe_allow_html=True)
         regla_prompt = "Usa el estándar: YYYY-MM-DD [Nombre], [Acción/Detalle]"
     else:
-        regla_prompt = st.text_input("✨ Instrucciones de Nomenclatura (Funciona con Inteligencia Artificial):", placeholder="Ej: Extraer la fecha y el nombre del cliente en mayúsculas...")
+        st.text_input("✨ Instrucciones de Nomenclatura (Funciona con Inteligencia Artificial):", placeholder="Ej: Extraer la fecha y el nombre del cliente en mayúsculas...", key="regla_ia")
+        regla_prompt = st.session_state.get("regla_ia", "")
     
     st.divider()
     archivos_docs = st.file_uploader("Arrastra documentos individuales", type=["pdf"], accept_multiple_files=True, key="up_docs")
