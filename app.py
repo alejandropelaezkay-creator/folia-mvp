@@ -6,7 +6,8 @@ import shutil
 import tempfile
 from pathlib import Path
 import streamlit as st
-import pymupdf as fitz
+import pypdfium2 as pdfium
+from pypdf import PdfReader, PdfWriter
 from google import genai
 from google.genai import types
 
@@ -48,28 +49,33 @@ def procesar_expediente_nube(pdf_bytes, token_adobe, prefijo_marcador=None, apli
         path_out = Path(t_out.name)
         
     try:
-        doc_orig = fitz.open(str(path_in))
-        fojas_originales = len(doc_orig)
-        doc_orig.close()
+        reader_orig = PdfReader(path_in)
+        fojas_originales = len(reader_orig.pages)
         
         if aplicar_limpieza:
             opt.limpiar_paginas_blanco(path_in, path_temp)
         else:
             shutil.copy(path_in, path_temp)
             
+        # OCR en Adobe
         opt.procesar_bloque_adobe(str(path_temp), str(path_out), token_adobe)
         
-        doc_final = fitz.open(str(path_out))
-        fojas_conservadas = len(doc_final)
+        # RECONSTRUCCIÓN: Repara fuentes corruptas de CamScanner/Adobe y añade marcadores
+        reader_final = PdfReader(path_out)
+        fojas_conservadas = len(reader_final.pages)
+        
+        writer = PdfWriter()
+        writer.append_pages_from_reader(reader_final)
         
         if prefijo_marcador:
-            toc = [[1, f"{prefijo_marcador} {i+1}", i+1] for i in range(fojas_conservadas)]
-            doc_final.set_toc(toc)
-            doc_final.saveIncr()
+            for i in range(fojas_conservadas):
+                writer.add_outline_item(f"{prefijo_marcador} {i+1}", i)
+                
+        with open(path_out, "wb") as f:
+            writer.write(f)
             
         with open(path_out, "rb") as f:
             bytes_finales = f.read()
-        doc_final.close()
         
         return {
             "bytes": bytes_finales,
@@ -85,13 +91,16 @@ def procesar_expediente_nube(pdf_bytes, token_adobe, prefijo_marcador=None, apli
 
 def obtener_nombre_ia(pdf_bytes, regla_prompt):
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        texto_extraido = [page.get_text()[:1500] for page in doc[:4]]
-        doc.close()
+        # pypdfium2 ignora errores de fuente y fuerza la extracción de texto
+        pdf = pdfium.PdfDocument(pdf_bytes)
+        texto_extraido = []
+        for i in range(min(4, len(pdf))):
+            texto_extraido.append(pdf[i].get_textpage().get_text_range()[:1500])
         texto = "".join(texto_extraido)
+        pdf.close()
         
-        if len(texto.strip()) < 20:
-            return None
+        if len(texto.strip()) < 15:
+            return "ERROR_TEXTO_ILEGIBLE"
             
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         prompt = f"Regla de nomenclatura estricta a seguir: {regla_prompt}\n\nAplica esta regla al siguiente texto documental y devuelve SOLO el nombre del archivo resultante sin extensión ni explicaciones:\n\n{texto}"
@@ -104,9 +113,9 @@ def obtener_nombre_ia(pdf_bytes, regla_prompt):
         if res.text:
             limpio = res.text.strip().replace("\n", "")
             return re.sub(r'[\\/*?:"<>|]', '-', limpio)[:120]
-        return None
+        return "ERROR_RESPUESTA_VACIA"
     except Exception as e:
-        return None
+        return f"ERROR_IA: {str(e)}"
 
 # 3. BARRA LATERAL
 with st.sidebar:
@@ -170,12 +179,17 @@ with tab_docs:
                         st.write("🔐 Conectando con motores de procesamiento...")
                         token_adobe = opt.obtener_token_adobe()
                         
-                        st.write("⚙️ Limpiando fojas y aplicando OCR/Compresión...")
+                        st.write("⚙️ Limpiando fojas, reestructurando fuentes y aplicando OCR...")
                         res = procesar_expediente_nube(arch.getvalue(), token_adobe, aplicar_limpieza=opt_limpiar)
                         
                         st.write("🤖 Analizando texto con IA...")
                         nombre_ia = obtener_nombre_ia(res["bytes"], regla_prompt)
-                        nombre_final = f"{nombre_ia}.pdf" if nombre_ia else f"{arch.name.replace('.pdf', '')}_FolIA.pdf"
+                        
+                        if nombre_ia and not nombre_ia.startswith("ERROR"):
+                            nombre_final = f"{nombre_ia}.pdf"
+                        else:
+                            st.warning(f"⚠️ Renombrado omitido ({nombre_ia}). Usando nombre genérico.")
+                            nombre_final = f"{arch.name.replace('.pdf', '')}_FolIA.pdf"
                         
                         st.session_state.creditos -= res["fojas_conservadas"]
                         st.session_state.historial_consumo.append({"Expediente": nombre_final, "Fojas Válidas": res["fojas_conservadas"], "Créditos": res["fojas_conservadas"], "Tipo": "Documento"})
